@@ -329,39 +329,73 @@ For each slide, decide independently whether a visual will help comprehension:
 
 Course requirement: {course_requirement}
 """
-    try:
-        client = OpenAI(api_key=api_key)
-        resp = client.responses.create(
-            model=OPENAI_MODEL,
-            input=prompt,
-            temperature=0.3,
-        )
-        content = getattr(resp, "output_text", "").strip()
-        if not content:
-            return None
-        data = json.loads(content)
-        slides = data.get("slides", [])
-        if not isinstance(slides, list) or not (4 <= len(slides) <= 10):
-            return None
-        normalized: list[dict] = []
-        for i, slide in enumerate(slides, start=1):
-            title  = _truncate_title(str(slide.get("title", f"Slide {i}")).strip())
-            text   = str(slide.get("text", "")).strip()
-            visual = slide.get("visual")  # dict or None
-            if not text:
+    def _call_llm(temperature: float, extra_warning: str = "") -> list[dict] | None:
+        try:
+            client = OpenAI(api_key=api_key)
+            resp = client.responses.create(
+                model=OPENAI_MODEL,
+                input=prompt + extra_warning,
+                temperature=temperature,
+            )
+            content = getattr(resp, "output_text", "").strip()
+            if not content:
                 return None
-            # Validate visual spec if present
-            if isinstance(visual, dict):
-                if visual.get("type") not in ("manim", "image_gen"):
+            data = json.loads(content)
+            slides = data.get("slides", [])
+            if not isinstance(slides, list) or not (4 <= len(slides) <= 10):
+                return None
+            result: list[dict] = []
+            for i, s in enumerate(slides, start=1):
+                title  = _truncate_title(str(s.get("title", f"Slide {i}")).strip())
+                text   = str(s.get("text", "")).strip()
+                visual = s.get("visual")
+                if not text:
+                    return None
+                if isinstance(visual, dict):
+                    if visual.get("type") not in ("manim", "image_gen"):
+                        visual = None
+                    elif not visual.get("description", "").strip():
+                        visual = None
+                else:
                     visual = None
-                elif not visual.get("description", "").strip():
-                    visual = None
-            else:
-                visual = None
-            normalized.append({"page": str(i), "title": title, "text": text, "visual": visual})
-        return normalized
-    except Exception:
+                result.append({"page": str(i), "title": title, "text": text, "visual": visual})
+            return result
+        except Exception:
+            return None
+
+    normalized = _call_llm(temperature=0.3)
+    if normalized and _contains_meta_content(normalized):
+        # First attempt still produced curriculum-planner meta-content — retry harder
+        retry_warning = (
+            "\n\nCRITICAL RETRY: Your previous output contained banned meta-language "
+            "(e.g. 'learning goals', 'Bloom', 'taxonomy', 'objectives'). "
+            "That output is REJECTED. Every sentence in your new output must be "
+            "actual subject-matter explanation directed at the student — "
+            "not a description of the lesson plan."
+        )
+        normalized = _call_llm(temperature=0.5, extra_warning=retry_warning)
+    # If retry also contains meta-content, fall through to None → hardcoded fallback
+    if normalized and _contains_meta_content(normalized):
         return None
+    return normalized
+
+
+_META_KEYWORDS: frozenset[str] = frozenset([
+    "learning goal", "learning objectives", "bloom", "taxonomy",
+    "key learning point", "by the end of this", "in this lesson",
+    "in this slide", "this lesson cover", "learning outcome",
+    "pedagogical", "curriculum", "key concept", "core concept",
+    "introduction to", "overview of", "summary of",
+    "students will", "learners will", "you will learn",
+])
+
+
+def _contains_meta_content(slides: list[dict]) -> bool:
+    for slide in slides:
+        combined = (slide.get("title", "") + " " + slide.get("text", "")).lower()
+        if any(kw in combined for kw in _META_KEYWORDS):
+            return True
+    return False
 
 
 def _truncate_to_word_limit(text: str, max_words: int = 100) -> str:
@@ -586,30 +620,8 @@ def _ensure_slide_defaults(slides: list[dict[str, str]]) -> None:
 
 
 def _build_narration_text(slide: dict[str, str]) -> str:
-    bullets = slide.get("bullet_points")
-    if isinstance(bullets, list) and bullets:
-        base = " ".join(str(b).strip() for b in bullets if str(b).strip())
-    else:
-        base = str(slide.get("text", "")).strip()
-    visual_type = str(slide.get("visual_type", "none")).strip().lower()
-    if visual_type == "none":
-        return base
-    if visual_type == "image":
-        return (
-            f"Let's use this visual to understand the idea. {base} "
-            "Focus on how each labeled part connects to the main principle."
-        )
-    if visual_type == "code_diagram":
-        return (
-            f"We will follow this step flow together. {base} "
-            "Watch how each step leads to the next and why the final result is valid."
-        )
-    if visual_type == "math_animation":
-        return (
-            f"Track the transformation carefully as we move through each stage. {base} "
-            "Each change follows a specific mathematical rule."
-        )
-    return base
+    # Narrate the actual teaching text directly — never inject curriculum-planner wrappers.
+    return str(slide.get("text", "")).strip()
 
 
 def _url_for_artifact(request: Request, abs_path: Path) -> str:
@@ -901,15 +913,8 @@ def _render_slide_image(
     # ── Body text (upper zone) ────────────────────────────────────────────────
     body_line_h    = 34
     max_body_lines = (TEXT_Y_MAX - TEXT_Y_START) // body_line_h
-    body_lines: list[str] = []
-    raw_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    if raw_lines:
-        for raw in raw_lines:
-            line = raw if raw.startswith("•") else f"• {raw}"
-            body_lines.extend(_wrap_text(draw, line, body_font, width - MARGIN * 2))
-    else:
-        body_lines = _wrap_text(draw, body, body_font, width - MARGIN * 2)
-    lines = body_lines[:max_body_lines]
+    # Render as continuous prose — no bullet conversion that fragments teaching flow
+    lines = _wrap_text(draw, body, body_font, width - MARGIN * 2)[:max_body_lines]
     y = TEXT_Y_START
     for line in lines:
         draw.text((MARGIN, y), line, fill=(26, 44, 76), font=body_font)
