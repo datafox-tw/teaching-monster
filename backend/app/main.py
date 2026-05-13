@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -103,68 +104,103 @@ def _srt_time(seconds: float) -> str:
 
 
 def _build_slide_plan(course_requirement: str, student_persona: str) -> list[dict[str, str]]:
+    # Fallback when no LLM is available — produces bare-minimum teacher-mode content.
+    topic = course_requirement.strip() or "this topic"
     return [
         {
             "page": "1",
-            "title": "Learning Goal",
+            "title": f"What Is {topic}?",
             "text": (
-                f"Today we will learn: {course_requirement}. "
-                f"This lesson is adapted for this learner profile: {student_persona}. "
-                "We will first define the key idea, then connect it to one concrete example."
+                f"{topic} is a fundamental concept you need to understand clearly. "
+                "The core idea is that every phenomenon has a precise definition that "
+                "distinguishes it from related but different concepts. "
+                "Pay attention to the exact wording — vague understanding leads to wrong answers."
             ),
-            "visual_type": "none",
-            "visual_prompt": "",
+            "visual": None,
         },
         {
             "page": "2",
-            "title": "Core Concept",
+            "title": "The Key Principle",
             "text": (
-                "Core explanation of the requested topic: identify the main principle, "
-                "the important terms, and the condition where the idea applies correctly."
+                f"Here is the central principle of {topic}: the relationship between "
+                "cause and effect is governed by a specific rule that only applies under "
+                "defined conditions. "
+                "Think of it like a recipe — every ingredient and step must be correct, "
+                "or the outcome changes. "
+                "Identify what stays constant and what varies."
             ),
-            "visual_type": "image",
-            "visual_prompt": "A clean educational concept diagram with labeled parts.",
+            "visual": None,
         },
         {
             "page": "3",
-            "title": "Worked Example",
+            "title": "Worked Example — Step by Step",
             "text": (
-                "Worked example for the requested topic: walk through one concrete case step by step, "
-                "then summarize why the result follows from the core concept."
+                f"Let us apply {topic} to a concrete case. "
+                "Step 1: identify the known quantities. "
+                "Step 2: choose the correct formula or rule. "
+                "Step 3: substitute values carefully, tracking units. "
+                "Step 4: interpret the result — does it make physical or logical sense? "
+                "This four-step habit prevents most errors."
             ),
-            "visual_type": "code_diagram",
-            "visual_prompt": "A simple step-by-step flow diagram of the worked example.",
+            "visual": None,
         },
     ]
 
 
 def _subject_from_requirement(course_requirement: str) -> str:
     req = course_requirement.lower()
-    if any(k in req for k in ["physics", "newton", "force", "motion", "energy", "momentum"]):
-        return "physics"
-    if any(k in req for k in ["biology", "cell", "dna", "gene", "evolution", "ecosystem"]):
-        return "biology"
-    if any(k in req for k in ["computer science", "algorithm", "data structure", "python", "programming"]):
-        return "computer_science"
-    if any(
-        k in req
-        for k in [
-            "math",
-            "mathematics",
-            "calculus",
-            "algebra",
-            "geometry",
-            "probability",
-            "quadratic",
-            "polynomial",
-            "function",
-            "equation",
-            "trigonometry",
-            "statistics",
-        ]
-    ):
-        return "mathematics"
-    return "physics"
+    # Chinese keywords for the known competition topics
+    _ZH_BIOLOGY = {"植物", "進化", "保護", "生物", "細胞", "基因", "演化", "生態", "光合", "呼吸作用", "蛋白質"}
+    _ZH_PHYSICS = {"物理", "牛頓", "力學", "運動", "能量", "動量", "熱力學", "電磁", "量子", "相對論"}
+    _ZH_CS = {"人工智慧", "機器學習", "演算法", "程式", "神經網路", "深度學習", "資料結構", "電腦科學", "迴歸"}
+    _ZH_MATH = {"幾何", "函數", "估算", "數學", "微積分", "代數", "機率", "統計", "方程", "三角", "矩陣", "向量", "建模"}
+    # English keywords
+    _BIOLOGY = {"biology", "cell", "dna", "gene", "evolution", "ecosystem",
+                "photosynthesis", "respiration", "protein", "enzyme", "organism",
+                "anatomy", "mitosis", "meiosis", "chlorophyll", "atp",
+                "metabolism", "osmosis", "diffusion", "plant", "conservation",
+                "morphology", "species", "natural selection", "biodiversity"}
+    _PHYSICS = {"physics", "newton", "force", "motion", "energy", "momentum",
+                "thermodynamics", "wave", "optics", "electricity", "magnetism",
+                "quantum", "relativity", "velocity", "acceleration", "torque",
+                "circuit", "gravitational"}
+    _CS = {"algorithm", "data structure", "python", "programming", "software",
+           "machine learning", "artificial intelligence", "neural network",
+           "deep learning", "gradient descent", "backpropagation", "llm",
+           "natural language processing", "computer vision", "computer science",
+           "approaches to ai", "regression", "classification", "supervised",
+           "unsupervised", "inference"}
+    _MATH = {"math", "mathematics", "calculus", "algebra", "geometry", "probability",
+             "quadratic", "polynomial", "function", "equation", "trigonometry",
+             "statistics", "integral", "derivative", "matrix", "vector",
+             "estimation", "modeling", "geometric", "properties", "relations",
+             "regression"}
+    for kw in _ZH_BIOLOGY:
+        if kw in req:
+            return "biology"
+    for kw in _ZH_PHYSICS:
+        if kw in req:
+            return "physics"
+    for kw in _ZH_CS:
+        if kw in req:
+            return "computer_science"
+    for kw in _ZH_MATH:
+        if kw in req:
+            return "mathematics"
+    # English — biology before CS so "neural network" in a bio context stays bio
+    for kw in _BIOLOGY:
+        if kw in req:
+            return "biology"
+    for kw in _PHYSICS:
+        if kw in req:
+            return "physics"
+    for kw in _CS:
+        if kw in req:
+            return "computer_science"
+    for kw in _MATH:
+        if kw in req:
+            return "mathematics"
+    return "computer_science"
 
 
 def _build_slide_plan_with_llm(course_requirement: str, student_persona: str) -> list[dict[str, str]] | None:
@@ -173,26 +209,87 @@ def _build_slide_plan_with_llm(course_requirement: str, student_persona: str) ->
         return None
 
     prompt = f"""
-You are creating an AP-level high-school teaching video script outline.
-Constraints:
-- Output language must be English.
-- Subject must be one of: physics, biology, computer_science, mathematics.
-- Return strict JSON only (no markdown), as:
+You are a master AP-level teacher with 20 years of experience. You are speaking directly to
+a specific student who needs to understand "{course_requirement}".
+
+Student profile: {student_persona}
+
+=== TEACHING FRAMEWORK — apply to every slide ===
+1. HOOK: Open with a Socratic question or a surprising fact that creates genuine curiosity.
+   Example opener for a slide on velocity: "Here's a question most students get wrong:
+   if a car's speedometer reads 60 mph, does that mean it travelled 60 miles? Not quite..."
+2. EXPLAIN: Give the precise definition in plain language, then connect it to an analogy
+   drawn from concepts the STUDENT ALREADY KNOWS (read their persona carefully).
+3. APPLY: Walk through a concrete worked example with real numbers and every step shown.
+   Double-check your arithmetic — a wrong calculation is an immediate scoring failure.
+4. REINFORCE: Close each slide with one crisp sentence that states the irreducible core idea.
+
+=== SCAFFOLDING RULE ===
+Start from what THIS SPECIFIC STUDENT already knows. Build a bridge from their existing
+knowledge to the new concept. If the student knows basic algebra but not calculus, explain
+a rate of change as "the slope of the graph" — never as "the derivative" without first
+building that bridge. Mis-calibrating to the student is a scoring failure.
+
+=== ABSOLUTE PROHIBITIONS ===
+1. NEVER write "In this slide...", "This lesson covers...", "Learning objectives...",
+   "Key terms include...", or any sentence that describes the lesson rather than teaching it.
+2. NEVER produce outlines, bullet lists of topics, or "first we will... then we will..." framing.
+3. NEVER hallucinate formulas, data, citations, statistics, or case studies — only use
+   well-established, verifiable knowledge.
+4. NEVER write a sentence that could appear unchanged in a lesson on a completely different topic.
+5. NEVER leave a worked example with unchecked arithmetic — verify every numerical result.
+
+=== SLIDE COUNT ===
+Choose 5–8 slides based on how many distinct sub-concepts the topic genuinely requires.
+Do not pad. Do not compress unrelated ideas into one slide.
+Topic-specific guidance:
+- A topic with one core formula/concept (e.g. "conservation of momentum"): 5 slides.
+- A topic with multiple interacting mechanisms (e.g. "photosynthesis", "regression"): 7–8 slides.
+- A conceptual topic needing comparison of approaches (e.g. "approaches to AI"): 6–7 slides.
+
+=== OUTPUT FORMAT (strict JSON, no markdown fences) ===
+All slide titles and text MUST be written in English regardless of the language used in
+the course requirement or student persona.
+
+For each slide, decide independently whether a visual will help comprehension:
+- Use "manim" when the slide contains: a mathematical equation, geometric shape, graph,
+  coordinate system, algorithm step, or proof that benefits from animated illustration.
+- Use "image_gen" when the slide explains: a biological structure, physical apparatus,
+  chemical process, or system diagram that benefits from a labeled schematic.
+- Use null when the slide is: a Socratic hook, pure definition, analogy, or takeaway
+  that is already clear as prose — adding a visual would just be decoration.
+
 {{
-  "subject": "...",
+  "subject": "physics|biology|computer_science|mathematics",
   "slides": [
-    {{"page":"1","title":"...","text":"...","visual_type":"none|image|code_diagram|math_animation","visual_prompt":"..."}},
-    {{"page":"2","title":"...","text":"...","visual_type":"none|image|code_diagram|math_animation","visual_prompt":"..."}},
-    {{"page":"3","title":"...","text":"...","visual_type":"none|image|code_diagram|math_animation","visual_prompt":"..."}}
+    {{
+      "page": "1",
+      "title": "<specific, topic-anchored title — never generic>",
+      "text": "<direct teaching prose in English, max 150 words>",
+      "visual": null
+    }},
+    {{
+      "page": "2",
+      "title": "...",
+      "text": "...",
+      "visual": {{
+        "type": "manim",
+        "description": "<precise Manim animation description: what shapes, equations, motions>"
+      }}
+    }},
+    {{
+      "page": "3",
+      "title": "...",
+      "text": "...",
+      "visual": {{
+        "type": "image_gen",
+        "description": "<diagram description: what to label, what process to show>"
+      }}
+    }}
   ]
 }}
-- Exactly 3 slides.
-- Keep each text around 2-4 concise teaching sentences.
-- Include one worked example in slide 3.
-- Keep each slide body under 150 words.
 
 Course requirement: {course_requirement}
-Student persona: {student_persona}
 """
     try:
         client = OpenAI(api_key=api_key)
@@ -206,27 +303,24 @@ Student persona: {student_persona}
             return None
         data = json.loads(content)
         slides = data.get("slides", [])
-        if not isinstance(slides, list) or len(slides) != 3:
+        if not isinstance(slides, list) or not (3 <= len(slides) <= 8):
             return None
-        normalized: list[dict[str, str]] = []
+        normalized: list[dict] = []
         for i, slide in enumerate(slides, start=1):
-            title = str(slide.get("title", f"Slide {i}")).strip()
-            text = str(slide.get("text", "")).strip()
+            title  = str(slide.get("title", f"Slide {i}")).strip()
+            text   = str(slide.get("text", "")).strip()
+            visual = slide.get("visual")  # dict or None
             if not text:
                 return None
-            visual_type = str(slide.get("visual_type", "none")).strip().lower()
-            if visual_type not in {"none", "image", "code_diagram", "math_animation"}:
-                visual_type = "none"
-            visual_prompt = str(slide.get("visual_prompt", "")).strip()
-            normalized.append(
-                {
-                    "page": str(i),
-                    "title": title,
-                    "text": text,
-                    "visual_type": visual_type,
-                    "visual_prompt": visual_prompt,
-                }
-            )
+            # Validate visual spec if present
+            if isinstance(visual, dict):
+                if visual.get("type") not in ("manim", "image_gen"):
+                    visual = None
+                elif not visual.get("description", "").strip():
+                    visual = None
+            else:
+                visual = None
+            normalized.append({"page": str(i), "title": title, "text": text, "visual": visual})
         return normalized
     except Exception:
         return None
@@ -255,35 +349,36 @@ def _build_blueprint_fallback(
     slides: list[dict[str, str]],
 ) -> dict[str, Any]:
     level = _infer_level_from_persona(student_persona)
+    topic = course_requirement.strip()
     if level == "introductory":
         objectives = [
-            "Understand the core definition and vocabulary",
-            "Connect concept to one concrete daily-life example",
-            "Avoid common beginner misconceptions",
+            f"Student can state the definition of {topic} in their own words",
+            f"Student can connect {topic} to one concrete real-world example",
+            f"Student can identify the most common beginner mistake about {topic}",
         ]
         misconceptions = [
-            "Confusing related terms without context",
-            "Assuming one example covers all cases",
+            f"Treating {topic} as interchangeable with a related but distinct concept",
+            "Assuming the introductory example covers all cases",
         ]
     elif level == "advanced":
         objectives = [
-            "Explain the concept with precise terminology",
-            "Apply concept across multiple contexts",
-            "Compare edge cases and limitations",
+            f"Student can apply {topic} to multi-step problems with correct notation",
+            f"Student can explain when and why {topic} fails or has exceptions",
+            f"Student can compare {topic} to related advanced concepts",
         ]
         misconceptions = [
-            "Overgeneralizing formula/definition beyond assumptions",
-            "Ignoring system boundaries in reasoning",
+            f"Overgeneralizing the formula or rule for {topic} beyond its stated assumptions",
+            "Ignoring boundary conditions or system constraints when applying the concept",
         ]
     else:
         objectives = [
-            "Build a correct conceptual model",
-            "Apply concept to one worked example",
-            "Identify and correct likely misunderstandings",
+            f"Student can describe the core mechanism of {topic}",
+            f"Student can work through a concrete example of {topic} step by step",
+            f"Student can articulate why a common misconception about {topic} is wrong",
         ]
         misconceptions = [
-            "Mixing cause and effect in explanations",
-            "Skipping conditions required for correct application",
+            f"Confusing the direction of causality in {topic}",
+            "Skipping the conditions required for the concept to apply correctly",
         ]
 
     covered = [slide["title"] for slide in slides]
@@ -294,11 +389,13 @@ def _build_blueprint_fallback(
         "student_persona": student_persona,
         "difficulty_level": level,
         "teaching_intent": {
-            "approach": "scaffolded_progression",
+            "approach": "scaffolded direct instruction: hook → definition → analogy → worked example → reinforcement",
+            "zone_of_proximal_development": f"Student brings prior knowledge from their stated background; lesson bridges to {topic}.",
             "objectives": objectives,
         },
         "covered_concepts": covered,
         "misconceptions": misconceptions,
+        "accuracy_notes": f"Verify all formulas and worked examples for {topic} against established AP curriculum.",
     }
 
 
@@ -312,7 +409,10 @@ def _build_blueprint_with_llm(
     if not api_key:
         return None
     prompt = f"""
-Create a strict JSON course blueprint for adaptive teaching.
+Create a strict JSON teaching blueprint aligned with AP-level educational standards.
+This blueprint will be evaluated on four dimensions: content accuracy, teaching logic,
+learner adaptability, and cognitive engagement.
+
 Output JSON only, schema:
 {{
   "subject": "physics|biology|computer_science|mathematics",
@@ -321,11 +421,19 @@ Output JSON only, schema:
   "student_persona": "...",
   "difficulty_level": "introductory|intermediate|advanced",
   "teaching_intent": {{
-    "approach": "...",
-    "objectives": ["...", "...", "..."]
+    "approach": "scaffolded direct instruction: hook → definition → analogy → worked example → reinforcement",
+    "zone_of_proximal_development": "<one sentence: what the student knows vs. what they will learn>",
+    "objectives": [
+      "<student outcome: 'Student can [verb] [specific thing]' — not 'cover' or 'introduce'>",
+      ...
+    ]
   }},
-  "covered_concepts": ["...", "..."],
-  "misconceptions": ["...", "..."]
+  "covered_concepts": ["<exact concept as taught in the slides, topic-specific>", ...],
+  "misconceptions": [
+    "<specific wrong belief students bring to THIS topic — not a generic mixing-of-terms error>",
+    ...
+  ],
+  "accuracy_notes": "<any domain-specific accuracy constraints or common hallucination risks for this topic>"
 }}
 
 Course requirement: {course_requirement}
@@ -490,109 +598,213 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, 
     return lines
 
 
+def _generate_manim_script_with_llm(description: str, subject: str) -> str | None:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+    prompt = f"""
+Write a self-contained Manim (Community Edition v0.18) Python script for this educational visual:
+"{description}"
+
+Rules (violations produce unusable output):
+- First line must be: from manim import *
+- Class name must be exactly: VisualScene (extends Scene)
+- Inside construct(), first line: self.camera.background_color = "#1e1e2e"
+- Use 3Blue1Brown palette — BLUE_D (#58C4DD), YELLOW (#FFFF00), WHITE, GREEN_B (#83C167)
+- Total duration 4–7 seconds (self.play + self.wait only)
+- For equations use MathTex; for labels use Text(font_size=28)
+- Maximum 30 lines inside construct()
+- Do NOT use external image files or custom fonts
+- Output ONLY valid Python code — no markdown fences, no explanation
+
+Subject context: {subject}
+"""
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        resp = client.responses.create(model=OPENAI_MODEL, input=prompt, temperature=0.1)
+        code = getattr(resp, "output_text", "").strip()
+        # Strip accidental markdown fences
+        code = re.sub(r"^```python\s*", "", code)
+        code = re.sub(r"\s*```$", "", code)
+        return code.strip() if code else None
+    except Exception:
+        return None
+
+
+def _render_manim_script(script_code: str, job_dir: Path, idx: int) -> Path | None:
+    script_path = job_dir / f"manim_scene_{idx}.py"
+    media_dir   = job_dir / f"manim_media_{idx}"
+    media_dir.mkdir(exist_ok=True)
+    script_path.write_text(script_code, encoding="utf-8")
+    try:
+        subprocess.run(
+            ["manim", "-ql", "-s",
+             "--media_dir", str(media_dir),
+             str(script_path), "VisualScene"],
+            capture_output=True, text=True, timeout=90, check=False,
+        )
+        png_files = sorted(media_dir.glob("**/*.png"))
+        return png_files[0] if png_files else None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _generate_dalle_image(description: str, job_dir: Path, idx: int) -> Path | None:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        client = OpenAI(api_key=api_key)
+        dalle_prompt = (
+            f"AP-level educational diagram for a student: {description}. "
+            "Clean scientific illustration, light background (#F0F4FA), "
+            "clear labels on all key components, professional textbook style, "
+            "no watermarks, no decorative borders."
+        )
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=dalle_prompt,
+            size="1792x1024",
+            quality="standard",
+            n=1,
+        )
+        image_url = response.data[0].url
+        img_path = job_dir / f"visual_{idx}.png"
+        urllib.request.urlretrieve(image_url, str(img_path))
+        return img_path
+    except Exception:
+        return None
+
+
+def _generate_slide_visual(
+    visual_spec: dict | None,
+    job_dir: Path,
+    idx: int,
+    subject: str,
+) -> Path | None:
+    if visual_spec is None:
+        return None
+    vtype       = visual_spec.get("type", "")
+    description = visual_spec.get("description", "").strip()
+    if not description:
+        return None
+
+    if vtype == "manim":
+        script = _generate_manim_script_with_llm(description, subject)
+        if script:
+            img = _render_manim_script(script, job_dir, idx)
+            if img:
+                return img
+        # Manim unavailable or failed — fall through to image_gen
+        return _generate_dalle_image(description, job_dir, idx)
+
+    if vtype == "image_gen":
+        return _generate_dalle_image(description, job_dir, idx)
+
+    return None
+
+
+def _resize_to_zone(src: Path, zone_w: int, zone_h: int) -> Image.Image:
+    img = Image.open(src).convert("RGBA")
+    img.thumbnail((zone_w, zone_h), Image.LANCZOS)
+    canvas = Image.new("RGBA", (zone_w, zone_h), (0, 0, 0, 0))
+    x_off = (zone_w - img.width)  // 2
+    y_off = (zone_h - img.height) // 2
+    canvas.paste(img, (x_off, y_off))
+    return canvas.convert("RGB")
+
+
 def _render_slide_image(
     page: int,
     title: str,
     body: str,
     output_path: Path,
     subtitle_text: str | None = None,
-    visual_asset_path: Path | None = None,
+    visual_path: Path | None = None,
 ) -> None:
-    width, height = 1280, 720
-    image = Image.new("RGB", (width, height), (243, 247, 252))
-    draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=44)
-    body_font = ImageFont.load_default(size=28)
-    small_font = ImageFont.load_default(size=20)
+    # ── Zone map (1280 × 720) ─────────────────────────────────────────────────
+    #
+    #  WITHOUT visual             WITH visual
+    #  ─────────────────          ─────────────────
+    #  0   – 72   header          0   – 72   header
+    #  80  – 148  title           80  – 148  title
+    #  158 – 490  body text       158 – 295  body text  (shorter)
+    #  490 – 518  gap             305 – 510  image zone (centred)
+    #  518        divider         510 – 518  gap
+    #  530 – 700  subtitle (opt)  518        divider
+    #                             530 – 700  subtitle (opt)
+    # ─────────────────────────────────────────────────────────────────────────
+    width, height  = 1280, 720
+    HEADER_H       = 72
+    TITLE_Y        = 80
+    MARGIN         = 64
+    DIVIDER_Y      = 518
+    SUB_Y_START    = 530
+    SUB_Y_END      = 700
 
-    # Header block
-    draw.rectangle([(0, 0), (width, 96)], fill=(19, 62, 135))
-    draw.text((40, 28), f"Slide {page}", fill=(236, 244, 255), font=small_font)
+    has_visual    = visual_path is not None and visual_path.exists()
+    TEXT_Y_START  = 158
+    TEXT_Y_MAX    = 295 if has_visual else 490
 
-    # Title
-    draw.text((64, 132), title, fill=(17, 32, 60), font=title_font)
+    IMAGE_Y_START = 305
+    IMAGE_Y_END   = 510
+    IMAGE_ZONE_W  = width - MARGIN * 2   # 1152 px
+    IMAGE_ZONE_H  = IMAGE_Y_END - IMAGE_Y_START  # 205 px
 
-    # Body with wrapping
-    max_body_width = width - 128
-    lines = _wrap_text(draw, body, body_font, max_body_width)
-    y = 220
-    if visual_asset_path and visual_asset_path.exists():
-        visual = Image.open(visual_asset_path).convert("RGB")
-        visual = visual.resize((620, 360))
-        image.paste(visual, (620, 210))
-        lines = lines[:7]
-        for line in lines:
-            draw.text((64, y), line, fill=(26, 44, 76), font=body_font)
-            y += 38
-    else:
-        for line in lines:
-            draw.text((64, y), line, fill=(26, 44, 76), font=body_font)
-            y += 42
+    canvas = Image.new("RGB", (width, height), (243, 247, 252))
+    draw   = ImageDraw.Draw(canvas)
 
-    # Optional burned-in subtitle area (bottom center)
-    if subtitle_text:
-        subtitle_box_top = height - 148
-        subtitle_box_bottom = height - 28
+    title_font = ImageFont.load_default(size=40)
+    body_font  = ImageFont.load_default(size=26 if has_visual else 27)
+    small_font = ImageFont.load_default(size=19)
+    badge_font = ImageFont.load_default(size=17)
+
+    # ── Header band ──────────────────────────────────────────────────────────
+    draw.rectangle([(0, 0), (width, HEADER_H)], fill=(19, 62, 135))
+    draw.text((MARGIN, 22), f"  Slide {page}  ", fill=(200, 220, 255), font=badge_font)
+
+    # ── Title (centred, underlined) ───────────────────────────────────────────
+    tb    = draw.textbbox((0, 0), title, font=title_font)
+    tx    = max(MARGIN, (width - (tb[2] - tb[0])) // 2)
+    draw.text((tx, TITLE_Y), title, fill=(17, 32, 60), font=title_font)
+    draw.rectangle([(MARGIN, 152), (width - MARGIN, 154)], fill=(19, 62, 135))
+
+    # ── Body text (upper zone) ────────────────────────────────────────────────
+    body_line_h    = 34
+    max_body_lines = (TEXT_Y_MAX - TEXT_Y_START) // body_line_h
+    lines = _wrap_text(draw, body, body_font, width - MARGIN * 2)
+    lines = lines[:max_body_lines]
+    y = TEXT_Y_START
+    for line in lines:
+        draw.text((MARGIN, y), line, fill=(26, 44, 76), font=body_font)
+        y += body_line_h
+
+    # ── Visual (lower zone, only when present) ────────────────────────────────
+    if has_visual:
+        vis_img = _resize_to_zone(visual_path, IMAGE_ZONE_W, IMAGE_ZONE_H)
+        # Subtle rounded-rect border behind image
         draw.rectangle(
-            [(48, subtitle_box_top), (width - 48, subtitle_box_bottom)],
-            fill=(0, 0, 0),
+            [(MARGIN - 4, IMAGE_Y_START - 4), (width - MARGIN + 4, IMAGE_Y_END + 4)],
+            fill=(220, 228, 240),
         )
-        subtitle_lines = _wrap_text(draw, subtitle_text, small_font, width - 160)
-        max_lines = 3
-        subtitle_lines = subtitle_lines[:max_lines]
-        sy = subtitle_box_top + 18
-        for line in subtitle_lines:
-            bbox = draw.textbbox((0, 0), line, font=small_font)
-            line_w = bbox[2] - bbox[0]
-            sx = (width - line_w) // 2
-            draw.text((sx, sy), line, fill=(255, 255, 255), font=small_font)
-            sy += 30
+        canvas.paste(vis_img, (MARGIN, IMAGE_Y_START))
+
+    # ── Divider + subtitle (optional) ────────────────────────────────────────
+    if subtitle_text:
+        draw.rectangle(
+            [(MARGIN, DIVIDER_Y), (width - MARGIN, DIVIDER_Y + 1)], fill=(180, 195, 220)
+        )
+        draw.rectangle([(0, SUB_Y_START - 4), (width, SUB_Y_END)], fill=(18, 24, 40))
+        sub_lines = _wrap_text(draw, subtitle_text, small_font, width - MARGIN * 2)[:3]
+        total_h   = len(sub_lines) * 28
+        sy        = SUB_Y_START + (SUB_Y_END - SUB_Y_START - total_h) // 2
+        for line in sub_lines:
+            lw = draw.textbbox((0, 0), line, font=small_font)[2]
+            draw.text(((width - lw) // 2, sy), line, fill=(230, 240, 255), font=small_font)
+            sy += 28
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path, format="PNG")
-
-
-def _render_visual_asset(
-    page: int,
-    visual_type: str,
-    visual_prompt: str,
-    output_path: Path,
-) -> None:
-    if visual_type == "none":
-        return
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    w, h = 620, 360
-    image = Image.new("RGB", (w, h), (255, 255, 255))
-    draw = ImageDraw.Draw(image)
-    title_font = ImageFont.load_default(size=22)
-    body_font = ImageFont.load_default(size=18)
-
-    # header
-    draw.rectangle([(0, 0), (w, 52)], fill=(39, 82, 156))
-    draw.text((16, 16), f"Visual {page}: {visual_type}", fill=(255, 255, 255), font=title_font)
-
-    if visual_type == "image":
-        draw.rectangle([(30, 90), (280, 320)], outline=(20, 20, 20), width=3)
-        draw.ellipse([(340, 120), (560, 320)], outline=(20, 20, 20), width=3)
-        draw.line([(280, 205), (340, 205)], fill=(20, 20, 20), width=3)
-    elif visual_type == "code_diagram":
-        boxes = [((60, 90), "Input"), ((240, 90), "Process"), ((420, 90), "Output")]
-        for (x, y), label in boxes:
-            draw.rectangle([(x, y), (x + 140, y + 70)], outline=(20, 20, 20), width=3)
-            draw.text((x + 36, y + 28), label, fill=(20, 20, 20), font=body_font)
-        draw.line([(200, 125), (240, 125)], fill=(20, 20, 20), width=3)
-        draw.line([(380, 125), (420, 125)], fill=(20, 20, 20), width=3)
-        draw.rectangle([(60, 210), (560, 320)], outline=(120, 120, 120), width=2)
-    else:  # math_animation placeholder visual
-        draw.text((30, 95), "x(t) -> x(t+1) -> x(t+2)", fill=(20, 20, 20), font=title_font)
-        draw.text((30, 140), "Apply rule at each step", fill=(20, 20, 20), font=body_font)
-        draw.line([(40, 190), (560, 190)], fill=(20, 20, 20), width=3)
-        for x in [80, 220, 360, 500]:
-            draw.ellipse([(x - 10, 180), (x + 10, 200)], fill=(39, 82, 156))
-
-    prompt_preview = _truncate_to_word_limit(visual_prompt or "", max_words=20)
-    draw.text((20, 332), prompt_preview, fill=(90, 90, 90), font=body_font)
-    image.save(output_path, format="PNG")
+    canvas.save(output_path, format="PNG")
 
 
 def _compose_mp4(timeline: list[dict[str, Any]], output_path: Path) -> float:
@@ -743,13 +955,19 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
                 status_code=502,
                 detail=f"TTS generation failed on page {idx}: {type(exc).__name__}: {exc}",
             ) from exc
+        visual_path = _generate_slide_visual(
+            slide.get("visual"),
+            job_dir=job_dir,
+            idx=idx,
+            subject=detected_subject,
+        )
         _render_slide_image(
             page=idx,
             title=slide["title"],
             body=slide["text"],
             output_path=page_image,
             subtitle_text=slide["text"] if payload.enable_subtitles else None,
-            visual_asset_path=page_visual if page_visual.exists() else None,
+            visual_path=visual_path,
         )
         duration = _read_duration_seconds(page_audio)
         if duration <= 0:
