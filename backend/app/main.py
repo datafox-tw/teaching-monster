@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pypandoc
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
@@ -37,6 +38,9 @@ JOBS_ROOT = ARTIFACTS_ROOT / "jobs"
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_ROOT)), name="artifacts")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()  # local | s3
+PRESIGNED_EXPIRES_SECONDS = int(os.getenv("PRESIGNED_EXPIRES_SECONDS", "172800"))  # 48 hours
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 
 def _utc_now() -> datetime:
@@ -48,19 +52,38 @@ def _safe_id(raw: str) -> str:
 
 
 def _read_duration_seconds(audio_file: Path) -> float:
+    # Cross-platform duration probe (Linux/macOS/Windows) without OS-specific tools.
+    try:
+        clip = AudioFileClip(str(audio_file))
+        duration = float(clip.duration or 0.0)
+        clip.close()
+        if duration > 0:
+            return duration
+    except Exception:
+        pass
+
+    # Optional fallback when ffprobe is available in runtime image.
     proc = subprocess.run(
-        ["afinfo", str(audio_file)],
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(audio_file),
+        ],
         capture_output=True,
         text=True,
         check=False,
     )
-    for line in proc.stdout.splitlines():
-        if "estimated duration" in line:
-            raw = line.split(":", 1)[1].strip().split(" ")[0]
-            try:
-                return float(raw)
-            except ValueError:
-                return 0.0
+    raw = (proc.stdout or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.0
     return 0.0
 
 
@@ -349,7 +372,61 @@ def _slides_markdown(slides: list[dict[str, str]]) -> str:
 
 def _url_for_artifact(request: Request, abs_path: Path) -> str:
     rel = abs_path.relative_to(ARTIFACTS_ROOT).as_posix()
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}/artifacts/{rel}"
     return str(request.url_for("artifacts", path=rel))
+
+
+def _get_s3_client():
+    region = os.getenv("S3_REGION", "").strip() or None
+    endpoint = os.getenv("S3_ENDPOINT_URL", "").strip() or None
+    key = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+    secret = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+    if not key or not secret:
+        raise RuntimeError("Missing S3_ACCESS_KEY_ID or S3_SECRET_ACCESS_KEY")
+    return boto3.client(
+        "s3",
+        region_name=region,
+        endpoint_url=endpoint,
+        aws_access_key_id=key,
+        aws_secret_access_key=secret,
+    )
+
+
+def _upload_and_presign_s3(local_path: Path, object_key: str) -> str:
+    bucket = os.getenv("S3_BUCKET", "").strip()
+    if not bucket:
+        raise RuntimeError("Missing S3_BUCKET")
+    s3 = _get_s3_client()
+    s3.upload_file(str(local_path), bucket, object_key)
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": object_key},
+        ExpiresIn=PRESIGNED_EXPIRES_SECONDS,
+    )
+
+
+def _publish_artifact(request: Request, local_path: Path, request_id: str) -> str:
+    if STORAGE_BACKEND != "s3":
+        return _url_for_artifact(request, local_path)
+    object_prefix = os.getenv("S3_PREFIX", "teaching-monster").strip().strip("/")
+    rel = local_path.relative_to(ARTIFACTS_ROOT).as_posix()
+    key = f"{object_prefix}/{request_id}/{rel}"
+    return _upload_and_presign_s3(local_path, key)
+
+
+def _check_s3_ready() -> tuple[bool, str]:
+    try:
+        bucket = os.getenv("S3_BUCKET", "").strip()
+        if not bucket:
+            return False, "Missing S3_BUCKET"
+        s3 = _get_s3_client()
+        test_key = f"{os.getenv('S3_PREFIX', 'teaching-monster').strip().strip('/')}/healthcheck.txt"
+        s3.put_object(Bucket=bucket, Key=test_key, Body=b"ok")
+        s3.delete_object(Bucket=bucket, Key=test_key)
+        return True, "S3 write/delete check passed"
+    except Exception as exc:  # pragma: no cover - runtime guard
+        return False, f"S3 check failed: {type(exc).__name__}: {exc}"
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
@@ -455,6 +532,48 @@ def health() -> dict[str, str]:
     }
 
 
+@app.get("/health/ready")
+def health_ready() -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+
+    # Storage backend check
+    if STORAGE_BACKEND == "s3":
+        ok, detail = _check_s3_ready()
+        checks["storage"] = {
+            "ok": ok,
+            "backend": STORAGE_BACKEND,
+            "detail": detail,
+            "expires_seconds": PRESIGNED_EXPIRES_SECONDS,
+        }
+    else:
+        checks["storage"] = {
+            "ok": True,
+            "backend": STORAGE_BACKEND,
+            "detail": "local static storage enabled",
+            "expires_seconds": None,
+        }
+
+    # OpenAI key presence check (optional path because fallback exists)
+    has_openai = bool(os.getenv("OPENAI_API_KEY", "").strip())
+    checks["openai"] = {
+        "ok": True,
+        "detail": "OPENAI_API_KEY present" if has_openai else "OPENAI_API_KEY missing (fallback mode)",
+    }
+
+    # Core dependency/runtime checks
+    checks["runtime"] = {
+        "ok": True,
+        "detail": "moviepy/pillow/gtts modules loaded at startup",
+    }
+
+    all_ok = all(v.get("ok", False) for v in checks.values())
+    return {
+        "status": "ready" if all_ok else "degraded",
+        "timestamp": _utc_now().isoformat(),
+        "checks": checks,
+    }
+
+
 def _run_generation(payload: GenerateRequest, request: Request) -> GenerateResponse:
     job_id = _safe_id(payload.request_id)
     run_tag = _utc_now().strftime("%Y%m%dT%H%M%SZ")
@@ -522,7 +641,13 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
         )
         duration = _read_duration_seconds(page_audio)
         if duration <= 0:
-            raise HTTPException(status_code=500, detail=f"Generated empty audio on page {idx}.")
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Generated audio duration is zero on page {idx}. "
+                    "Likely runtime codec/probe issue or empty TTS output."
+                ),
+            )
         start = current_start
         end = start + duration
         timeline.append(
@@ -591,21 +716,30 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     manifest_path = job_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-    supplementary: list[str] = [
-        _url_for_artifact(request, manifest_path),
-        _url_for_artifact(request, blueprint_path),
-        _url_for_artifact(request, markdown_path),
-        _url_for_artifact(request, script_path),
+    # Competition constraint: supplementary files should not exceed 5 files.
+    supplementary_paths: list[Path] = [
+        blueprint_path,
+        manifest_path,
+        markdown_path,
+        script_path,
     ]
     if pptx_path.exists():
-        supplementary.append(_url_for_artifact(request, pptx_path))
-    for item in timeline:
-        supplementary.append(_url_for_artifact(request, Path(item["audio_file"])))
-        supplementary.append(_url_for_artifact(request, Path(item["image_file"])))
+        supplementary_paths.append(pptx_path)
+    supplementary_paths = supplementary_paths[:5]
+    supplementary: list[str] = [_publish_artifact(request, p, payload.request_id) for p in supplementary_paths]
+
+    # Ensure downloadable artifacts exist before returning URLs.
+    if not video_path.exists() or video_path.stat().st_size <= 0:
+        raise HTTPException(status_code=500, detail="Generated video file is missing or empty.")
+    if not srt_path.exists() or srt_path.stat().st_size <= 0:
+        raise HTTPException(status_code=500, detail="Generated subtitle file is missing or empty.")
+
+    video_url = _publish_artifact(request, video_path, payload.request_id)
+    subtitle_url = _publish_artifact(request, srt_path, payload.request_id)
 
     return GenerateResponse(
-        video_url=_url_for_artifact(request, video_path),
-        subtitle_url=_url_for_artifact(request, srt_path),
+        video_url=video_url,
+        subtitle_url=subtitle_url,
         supplementary_url=supplementary,
     )
 
