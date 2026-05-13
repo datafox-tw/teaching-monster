@@ -1,0 +1,9 @@
+.git
+.venv
+__pycache__
+*.pyc
+.DS_Store
+.env
+artifacts
+TeachingMonster-released
+*.log

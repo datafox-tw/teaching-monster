@@ -1,0 +1,7 @@
+# Optional rendering stack for math animation.
+# manim requires system packages such as:
+# - pkg-config
+# - cairo
+# - pango
+# - ffmpeg
+manim==0.20.1
