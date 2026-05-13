@@ -112,6 +112,8 @@ def _build_slide_plan(course_requirement: str, student_persona: str) -> list[dic
                 f"This lesson is adapted for this learner profile: {student_persona}. "
                 "We will first define the key idea, then connect it to one concrete example."
             ),
+            "visual_type": "none",
+            "visual_prompt": "",
         },
         {
             "page": "2",
@@ -120,6 +122,8 @@ def _build_slide_plan(course_requirement: str, student_persona: str) -> list[dic
                 "Core explanation of the requested topic: identify the main principle, "
                 "the important terms, and the condition where the idea applies correctly."
             ),
+            "visual_type": "image",
+            "visual_prompt": "A clean educational concept diagram with labeled parts.",
         },
         {
             "page": "3",
@@ -128,6 +132,8 @@ def _build_slide_plan(course_requirement: str, student_persona: str) -> list[dic
                 "Worked example for the requested topic: walk through one concrete case step by step, "
                 "then summarize why the result follows from the core concept."
             ),
+            "visual_type": "code_diagram",
+            "visual_prompt": "A simple step-by-step flow diagram of the worked example.",
         },
     ]
 
@@ -175,9 +181,9 @@ Constraints:
 {{
   "subject": "...",
   "slides": [
-    {{"page":"1","title":"...","text":"..."}},
-    {{"page":"2","title":"...","text":"..."}},
-    {{"page":"3","title":"...","text":"..."}}
+    {{"page":"1","title":"...","text":"...","visual_type":"none|image|code_diagram|math_animation","visual_prompt":"..."}},
+    {{"page":"2","title":"...","text":"...","visual_type":"none|image|code_diagram|math_animation","visual_prompt":"..."}},
+    {{"page":"3","title":"...","text":"...","visual_type":"none|image|code_diagram|math_animation","visual_prompt":"..."}}
   ]
 }}
 - Exactly 3 slides.
@@ -208,7 +214,19 @@ Student persona: {student_persona}
             text = str(slide.get("text", "")).strip()
             if not text:
                 return None
-            normalized.append({"page": str(i), "title": title, "text": text})
+            visual_type = str(slide.get("visual_type", "none")).strip().lower()
+            if visual_type not in {"none", "image", "code_diagram", "math_animation"}:
+                visual_type = "none"
+            visual_prompt = str(slide.get("visual_prompt", "")).strip()
+            normalized.append(
+                {
+                    "page": str(i),
+                    "title": title,
+                    "text": text,
+                    "visual_type": visual_type,
+                    "visual_prompt": visual_prompt,
+                }
+            )
         return normalized
     except Exception:
         return None
@@ -356,6 +374,44 @@ def _slides_markdown(slides: list[dict[str, str]]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _ensure_slide_defaults(slides: list[dict[str, str]]) -> None:
+    for idx, slide in enumerate(slides, start=1):
+        if "visual_type" not in slide:
+            slide["visual_type"] = "none" if idx == 1 else ("image" if idx == 2 else "code_diagram")
+        if "visual_prompt" not in slide:
+            if slide["visual_type"] == "image":
+                slide["visual_prompt"] = "A clear educational diagram relevant to the concept."
+            elif slide["visual_type"] == "code_diagram":
+                slide["visual_prompt"] = "A simple visual flow of steps for the worked example."
+            elif slide["visual_type"] == "math_animation":
+                slide["visual_prompt"] = "A visual sequence showing transformation of equations."
+            else:
+                slide["visual_prompt"] = ""
+
+
+def _build_narration_text(slide: dict[str, str]) -> str:
+    base = str(slide.get("text", "")).strip()
+    visual_type = str(slide.get("visual_type", "none")).strip().lower()
+    if visual_type == "none":
+        return base
+    if visual_type == "image":
+        return (
+            f"Let's use this visual to understand the idea. {base} "
+            "Focus on how each labeled part connects to the main principle."
+        )
+    if visual_type == "code_diagram":
+        return (
+            f"We will follow this step flow together. {base} "
+            "Watch how each step leads to the next and why the final result is valid."
+        )
+    if visual_type == "math_animation":
+        return (
+            f"Track the transformation carefully as we move through each stage. {base} "
+            "Each change follows a specific mathematical rule."
+        )
+    return base
+
+
 def _url_for_artifact(request: Request, abs_path: Path) -> str:
     rel = abs_path.relative_to(ARTIFACTS_ROOT).as_posix()
     if PUBLIC_BASE_URL:
@@ -440,6 +496,7 @@ def _render_slide_image(
     body: str,
     output_path: Path,
     subtitle_text: str | None = None,
+    visual_asset_path: Path | None = None,
 ) -> None:
     width, height = 1280, 720
     image = Image.new("RGB", (width, height), (243, 247, 252))
@@ -459,9 +516,18 @@ def _render_slide_image(
     max_body_width = width - 128
     lines = _wrap_text(draw, body, body_font, max_body_width)
     y = 220
-    for line in lines:
-        draw.text((64, y), line, fill=(26, 44, 76), font=body_font)
-        y += 42
+    if visual_asset_path and visual_asset_path.exists():
+        visual = Image.open(visual_asset_path).convert("RGB")
+        visual = visual.resize((620, 360))
+        image.paste(visual, (620, 210))
+        lines = lines[:7]
+        for line in lines:
+            draw.text((64, y), line, fill=(26, 44, 76), font=body_font)
+            y += 38
+    else:
+        for line in lines:
+            draw.text((64, y), line, fill=(26, 44, 76), font=body_font)
+            y += 42
 
     # Optional burned-in subtitle area (bottom center)
     if subtitle_text:
@@ -483,6 +549,49 @@ def _render_slide_image(
             sy += 30
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path, format="PNG")
+
+
+def _render_visual_asset(
+    page: int,
+    visual_type: str,
+    visual_prompt: str,
+    output_path: Path,
+) -> None:
+    if visual_type == "none":
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    w, h = 620, 360
+    image = Image.new("RGB", (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=22)
+    body_font = ImageFont.load_default(size=18)
+
+    # header
+    draw.rectangle([(0, 0), (w, 52)], fill=(39, 82, 156))
+    draw.text((16, 16), f"Visual {page}: {visual_type}", fill=(255, 255, 255), font=title_font)
+
+    if visual_type == "image":
+        draw.rectangle([(30, 90), (280, 320)], outline=(20, 20, 20), width=3)
+        draw.ellipse([(340, 120), (560, 320)], outline=(20, 20, 20), width=3)
+        draw.line([(280, 205), (340, 205)], fill=(20, 20, 20), width=3)
+    elif visual_type == "code_diagram":
+        boxes = [((60, 90), "Input"), ((240, 90), "Process"), ((420, 90), "Output")]
+        for (x, y), label in boxes:
+            draw.rectangle([(x, y), (x + 140, y + 70)], outline=(20, 20, 20), width=3)
+            draw.text((x + 36, y + 28), label, fill=(20, 20, 20), font=body_font)
+        draw.line([(200, 125), (240, 125)], fill=(20, 20, 20), width=3)
+        draw.line([(380, 125), (420, 125)], fill=(20, 20, 20), width=3)
+        draw.rectangle([(60, 210), (560, 320)], outline=(120, 120, 120), width=2)
+    else:  # math_animation placeholder visual
+        draw.text((30, 95), "x(t) -> x(t+1) -> x(t+2)", fill=(20, 20, 20), font=title_font)
+        draw.text((30, 140), "Apply rule at each step", fill=(20, 20, 20), font=body_font)
+        draw.line([(40, 190), (560, 190)], fill=(20, 20, 20), width=3)
+        for x in [80, 220, 360, 500]:
+            draw.ellipse([(x - 10, 180), (x + 10, 200)], fill=(39, 82, 156))
+
+    prompt_preview = _truncate_to_word_limit(visual_prompt or "", max_words=20)
+    draw.text((20, 332), prompt_preview, fill=(90, 90, 90), font=body_font)
     image.save(output_path, format="PNG")
 
 
@@ -566,16 +675,20 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     job_dir = JOBS_ROOT / f"{job_id}_{run_tag}"
     audio_dir = job_dir / "audio"
     image_dir = job_dir / "images"
+    visuals_dir = job_dir / "assets" / "visuals"
     job_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
     image_dir.mkdir(parents=True, exist_ok=True)
+    visuals_dir.mkdir(parents=True, exist_ok=True)
 
     slides = _build_slide_plan_with_llm(payload.course_requirement, payload.student_persona)
     if slides is None:
         slides = _build_slide_plan(payload.course_requirement, payload.student_persona)
+    _ensure_slide_defaults(slides)
     # Hard cap: no more than 150 words per slide body.
     for slide in slides:
         slide["text"] = _truncate_to_word_limit(str(slide.get("text", "")), max_words=150)
+        slide["narration_text"] = _truncate_to_word_limit(_build_narration_text(slide), max_words=170)
     detected_subject = _subject_from_requirement(payload.course_requirement)
     blueprint = _build_blueprint_with_llm(
         payload.course_requirement,
@@ -614,8 +727,17 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     for idx, slide in enumerate(slides, start=1):
         page_audio = audio_dir / f"page_{idx}.mp3"
         page_image = image_dir / f"page_{idx}.png"
+        page_visual = visuals_dir / f"page_{idx}.png"
+        visual_type = str(slide.get("visual_type", "none")).strip().lower()
+        visual_prompt = str(slide.get("visual_prompt", "")).strip()
+        _render_visual_asset(
+            page=idx,
+            visual_type=visual_type,
+            visual_prompt=visual_prompt,
+            output_path=page_visual,
+        )
         try:
-            gTTS(slide["text"], lang="en").save(str(page_audio))
+            gTTS(str(slide.get("narration_text", slide["text"])), lang="en").save(str(page_audio))
         except Exception as exc:  # pragma: no cover - runtime guard
             raise HTTPException(
                 status_code=502,
@@ -627,6 +749,7 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
             body=slide["text"],
             output_path=page_image,
             subtitle_text=slide["text"] if payload.enable_subtitles else None,
+            visual_asset_path=page_visual if page_visual.exists() else None,
         )
         duration = _read_duration_seconds(page_audio)
         if duration <= 0:
@@ -644,6 +767,10 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
                 "page": idx,
                 "title": slide["title"],
                 "text": slide["text"],
+                "narration_text": str(slide.get("narration_text", slide["text"])),
+                "visual_type": visual_type,
+                "visual_prompt": visual_prompt,
+                "visual_file": str(page_visual) if page_visual.exists() else None,
                 "audio_file": str(page_audio),
                 "image_file": str(page_image),
                 "duration_sec": duration,
