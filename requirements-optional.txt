@@ -1,7 +1,6 @@
-# Optional rendering stack for math animation.
-# manim requires system packages such as:
-# - pkg-config
-# - cairo
-# - pango
-# - ffmpeg
+# Optional rendering stack for Manim math animation.
+# Requires system packages (not available in python:3.12-slim):
+#   apt-get install -y gcc pkg-config libcairo2-dev libpango1.0-dev ffmpeg texlive-latex-base
+# The main app falls back to DALL-E image generation when manim is not installed.
 manim==0.20.1
+matplotlib
