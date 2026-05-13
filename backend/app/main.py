@@ -25,7 +25,7 @@ class GenerateRequest(BaseModel):
     course_requirement: str = Field(..., description="Learning objective and scope")
     student_persona: str = Field(..., description="Student background statement")
     enable_subtitles: bool = Field(
-        default=True,
+        default=False,
         description="Whether to generate subtitle file and burn subtitles into the video",
     )
 
@@ -144,6 +144,25 @@ def _build_slide_plan(course_requirement: str, student_persona: str) -> list[dic
                 "Step 3: substitute values carefully, tracking units. "
                 "Step 4: interpret the result — does it make physical or logical sense? "
                 "This four-step habit prevents most errors."
+            ),
+            "visual": None,
+        },
+        {
+            "page": "4",
+            "title": "Common Mistake",
+            "text": (
+                f"A frequent mistake with {topic} is applying the rule without checking conditions. "
+                "Always verify assumptions first. "
+                "If assumptions fail, the conclusion may be invalid."
+            ),
+            "visual": None,
+        },
+        {
+            "page": "5",
+            "title": "Quick Recap",
+            "text": (
+                f"Recap {topic} in three checks: define it, apply it, and verify assumptions. "
+                "Use this checklist whenever you solve related questions."
             ),
             "visual": None,
         },
@@ -306,7 +325,7 @@ Course requirement: {course_requirement}
             return None
         data = json.loads(content)
         slides = data.get("slides", [])
-        if not isinstance(slides, list) or not (3 <= len(slides) <= 8):
+        if not isinstance(slides, list) or not (4 <= len(slides) <= 10):
             return None
         normalized: list[dict] = []
         for i, slide in enumerate(slides, start=1):
@@ -329,11 +348,46 @@ Course requirement: {course_requirement}
         return None
 
 
-def _truncate_to_word_limit(text: str, max_words: int = 150) -> str:
+def _truncate_to_word_limit(text: str, max_words: int = 100) -> str:
     words = text.split()
     if len(words) <= max_words:
         return text
     return " ".join(words[:max_words])
+
+
+def _to_bullets(text: str, max_items: int = 4) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    bullets = [p.strip().rstrip(".") for p in parts if p.strip()]
+    if not bullets:
+        cleaned = text.strip()
+        return [cleaned] if cleaned else []
+    return bullets[:max_items]
+
+
+def _ensure_bullet_count(bullets: list[str], min_items: int = 3, max_items: int = 4) -> list[str]:
+    cleaned = [b.strip() for b in bullets if b and b.strip()]
+    if not cleaned:
+        return ["Key idea", "How it works", "Worked example"]
+    if len(cleaned) >= min_items:
+        return cleaned[:max_items]
+
+    # If too few bullets, split long text into evenly sized chunks.
+    text = " ".join(cleaned)
+    words = text.split()
+    if len(words) < min_items:
+        base = cleaned + [""] * (min_items - len(cleaned))
+        return [b if b else "Key point" for b in base][:max_items]
+
+    chunk_size = max(1, len(words) // min_items)
+    new_bullets: list[str] = []
+    start = 0
+    for i in range(min_items):
+        end = len(words) if i == min_items - 1 else min(len(words), start + chunk_size)
+        segment = " ".join(words[start:end]).strip()
+        if segment:
+            new_bullets.append(segment)
+        start = end
+    return new_bullets[:max_items]
 
 
 def _infer_level_from_persona(student_persona: str) -> str:
@@ -480,13 +534,21 @@ def _slides_markdown(slides: list[dict[str, str]]) -> str:
     for slide in slides:
         lines.append(f"# Slide {slide['page']}: {slide['title']}")
         lines.append("")
-        lines.append(slide["text"])
+        bullets = slide.get("bullet_points")
+        if isinstance(bullets, list) and bullets:
+            for bullet in bullets:
+                lines.append(f"- {str(bullet).strip()}")
+        else:
+            for bullet in _to_bullets(str(slide.get("text", ""))):
+                lines.append(f"- {bullet}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
 
 def _ensure_slide_defaults(slides: list[dict[str, str]]) -> None:
     for idx, slide in enumerate(slides, start=1):
+        if "bullet_points" not in slide:
+            slide["bullet_points"] = _to_bullets(str(slide.get("text", "")))
         if "visual_type" not in slide:
             slide["visual_type"] = "none" if idx == 1 else ("image" if idx == 2 else "code_diagram")
         if "visual_prompt" not in slide:
@@ -501,7 +563,11 @@ def _ensure_slide_defaults(slides: list[dict[str, str]]) -> None:
 
 
 def _build_narration_text(slide: dict[str, str]) -> str:
-    base = str(slide.get("text", "")).strip()
+    bullets = slide.get("bullet_points")
+    if isinstance(bullets, list) and bullets:
+        base = " ".join(str(b).strip() for b in bullets if str(b).strip())
+    else:
+        base = str(slide.get("text", "")).strip()
     visual_type = str(slide.get("visual_type", "none")).strip().lower()
     if visual_type == "none":
         return base
@@ -812,8 +878,15 @@ def _render_slide_image(
     # ── Body text (upper zone) ────────────────────────────────────────────────
     body_line_h    = 34
     max_body_lines = (TEXT_Y_MAX - TEXT_Y_START) // body_line_h
-    lines = _wrap_text(draw, body, body_font, width - MARGIN * 2)
-    lines = lines[:max_body_lines]
+    body_lines: list[str] = []
+    raw_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if raw_lines:
+        for raw in raw_lines:
+            line = raw if raw.startswith("•") else f"• {raw}"
+            body_lines.extend(_wrap_text(draw, line, body_font, width - MARGIN * 2))
+    else:
+        body_lines = _wrap_text(draw, body, body_font, width - MARGIN * 2)
+    lines = body_lines[:max_body_lines]
     y = TEXT_Y_START
     for line in lines:
         draw.text((MARGIN, y), line, fill=(26, 44, 76), font=body_font)
@@ -935,10 +1008,21 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     if slides is None:
         slides = _build_slide_plan(payload.course_requirement, payload.student_persona)
     _ensure_slide_defaults(slides)
-    # Hard cap: no more than 150 words per slide body.
+    # Hard cap: no more than 100 words per slide body; one text block with real line breaks.
     for slide in slides:
-        slide["text"] = _truncate_to_word_limit(str(slide.get("text", "")), max_words=150)
-        slide["narration_text"] = _truncate_to_word_limit(_build_narration_text(slide), max_words=170)
+        text = _truncate_to_word_limit(str(slide.get("text", "")), max_words=100)
+        bullets = slide.get("bullet_points")
+        if not isinstance(bullets, list) or not bullets:
+            bullets = _to_bullets(text, max_items=4)
+        bullets = [str(b).strip() for b in bullets if str(b).strip()]
+        combined = _truncate_to_word_limit(" ".join(bullets), max_words=100)
+        bullets = _to_bullets(combined, max_items=4)
+        bullets = _ensure_bullet_count(bullets, min_items=3, max_items=4)
+        if not bullets:
+            bullets = [combined] if combined else ["Key idea"]
+        slide["bullet_points"] = bullets
+        slide["text"] = "\n".join(bullets)
+        slide["narration_text"] = _truncate_to_word_limit(_build_narration_text(slide), max_words=120)
     detected_subject = _subject_from_requirement(payload.course_requirement)
     blueprint = _build_blueprint_with_llm(
         payload.course_requirement,
@@ -995,7 +1079,7 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
             title=slide["title"],
             body=slide["text"],
             output_path=page_image,
-            subtitle_text=slide["text"] if payload.enable_subtitles else None,
+            subtitle_text=None,
             visual_path=visual_path,
         )
         duration = _read_duration_seconds(page_audio)
