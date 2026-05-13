@@ -23,6 +23,10 @@ class GenerateRequest(BaseModel):
     request_id: str = Field(..., description="Unique request identifier")
     course_requirement: str = Field(..., description="Learning objective and scope")
     student_persona: str = Field(..., description="Student background statement")
+    enable_subtitles: bool = Field(
+        default=True,
+        description="Whether to generate subtitle file and burn subtitles into the video",
+    )
 
 
 class GenerateResponse(BaseModel):
@@ -99,57 +103,31 @@ def _srt_time(seconds: float) -> str:
 
 
 def _build_slide_plan(course_requirement: str, student_persona: str) -> list[dict[str, str]]:
-    req_lower = course_requirement.lower()
-    topic_title = "Newton's Laws of Motion"
-    concept_text = (
-        "Newton's Second Law states that net force equals mass times acceleration, "
-        "written as F equals m a. It links cause, force, to effect, acceleration."
-    )
-    example_text = (
-        "Example: if a two kilogram cart has a net force of ten newtons, "
-        "its acceleration is ten divided by two, which is five meters per second squared."
-    )
-
-    if "third law" in req_lower or "3rd law" in req_lower:
-        topic_title = "Newton's Third Law"
-        concept_text = (
-            "Newton's Third Law says every action force has an equal and opposite reaction force. "
-            "Forces always come in pairs acting on different objects."
-        )
-        example_text = (
-            "Example: when a skater pushes backward on the ground, "
-            "the ground pushes the skater forward with equal force in the opposite direction."
-        )
-    elif "first law" in req_lower or "1st law" in req_lower:
-        topic_title = "Newton's First Law"
-        concept_text = (
-            "Newton's First Law says an object stays at rest or moves at constant velocity "
-            "unless acted on by a net external force."
-        )
-        example_text = (
-            "Example: a book remains on a table until someone applies a force to move it."
-        )
-    elif "second law" in req_lower or "2nd law" in req_lower:
-        topic_title = "Newton's Second Law"
-
     return [
         {
             "page": "1",
             "title": "Learning Goal",
             "text": (
                 f"Today we will learn: {course_requirement}. "
-                f"This lesson is adapted for this learner profile: {student_persona}."
+                f"This lesson is adapted for this learner profile: {student_persona}. "
+                "We will first define the key idea, then connect it to one concrete example."
             ),
         },
         {
             "page": "2",
-            "title": f"Core Concept: {topic_title}",
-            "text": concept_text,
+            "title": "Core Concept",
+            "text": (
+                "Core explanation of the requested topic: identify the main principle, "
+                "the important terms, and the condition where the idea applies correctly."
+            ),
         },
         {
             "page": "3",
             "title": "Worked Example",
-            "text": example_text,
+            "text": (
+                "Worked example for the requested topic: walk through one concrete case step by step, "
+                "then summarize why the result follows from the core concept."
+            ),
         },
     ]
 
@@ -205,6 +183,7 @@ Constraints:
 - Exactly 3 slides.
 - Keep each text around 2-4 concise teaching sentences.
 - Include one worked example in slide 3.
+- Keep each slide body under 150 words.
 
 Course requirement: {course_requirement}
 Student persona: {student_persona}
@@ -233,6 +212,13 @@ Student persona: {student_persona}
         return normalized
     except Exception:
         return None
+
+
+def _truncate_to_word_limit(text: str, max_words: int = 150) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words])
 
 
 def _infer_level_from_persona(student_persona: str) -> str:
@@ -587,6 +573,9 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     slides = _build_slide_plan_with_llm(payload.course_requirement, payload.student_persona)
     if slides is None:
         slides = _build_slide_plan(payload.course_requirement, payload.student_persona)
+    # Hard cap: no more than 150 words per slide body.
+    for slide in slides:
+        slide["text"] = _truncate_to_word_limit(str(slide.get("text", "")), max_words=150)
     detected_subject = _subject_from_requirement(payload.course_requirement)
     blueprint = _build_blueprint_with_llm(
         payload.course_requirement,
@@ -637,7 +626,7 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
             title=slide["title"],
             body=slide["text"],
             output_path=page_image,
-            subtitle_text=slide["text"],
+            subtitle_text=slide["text"] if payload.enable_subtitles else None,
         )
         duration = _read_duration_seconds(page_audio)
         if duration <= 0:
@@ -681,15 +670,17 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
             detail=f"MP4 composition failed: {type(exc).__name__}: {exc}",
         ) from exc
 
-    # 6) Build SRT.
-    srt_path = job_dir / "subtitle.srt"
-    srt_lines: list[str] = []
-    for i, item in enumerate(timeline, start=1):
-        srt_lines.append(str(i))
-        srt_lines.append(f"{_srt_time(item['start_sec'])} --> {_srt_time(item['end_sec'])}")
-        srt_lines.append(item["text"])
-        srt_lines.append("")
-    srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
+    # 6) Build SRT (optional).
+    srt_path: Path | None = None
+    if payload.enable_subtitles:
+        srt_path = job_dir / "subtitle.srt"
+        srt_lines: list[str] = []
+        for i, item in enumerate(timeline, start=1):
+            srt_lines.append(str(i))
+            srt_lines.append(f"{_srt_time(item['start_sec'])} --> {_srt_time(item['end_sec'])}")
+            srt_lines.append(item["text"])
+            srt_lines.append("")
+        srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
 
     # 7) Manifest.
     manifest = {
@@ -731,11 +722,12 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     # Ensure downloadable artifacts exist before returning URLs.
     if not video_path.exists() or video_path.stat().st_size <= 0:
         raise HTTPException(status_code=500, detail="Generated video file is missing or empty.")
-    if not srt_path.exists() or srt_path.stat().st_size <= 0:
-        raise HTTPException(status_code=500, detail="Generated subtitle file is missing or empty.")
+    if payload.enable_subtitles:
+        if srt_path is None or (not srt_path.exists()) or srt_path.stat().st_size <= 0:
+            raise HTTPException(status_code=500, detail="Generated subtitle file is missing or empty.")
 
     video_url = _publish_artifact(request, video_path, payload.request_id)
-    subtitle_url = _publish_artifact(request, srt_path, payload.request_id)
+    subtitle_url = _publish_artifact(request, srt_path, payload.request_id) if srt_path else None
 
     return GenerateResponse(
         video_url=video_url,
