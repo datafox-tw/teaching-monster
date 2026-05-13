@@ -46,6 +46,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()  # local | s3
 PRESIGNED_EXPIRES_SECONDS = int(os.getenv("PRESIGNED_EXPIRES_SECONDS", "172800"))  # 48 hours
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "auto").lower()  # auto | gtts | openai
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "alloy")
 
 
 def _utc_now() -> datetime:
@@ -565,6 +568,43 @@ def _publish_artifact(request: Request, local_path: Path, request_id: str) -> st
     return _upload_and_presign_s3(local_path, key)
 
 
+def _synthesize_tts_openai(text: str, out_path: Path) -> None:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY missing for OpenAI TTS")
+    client = OpenAI(api_key=api_key)
+    speech = client.audio.speech.create(
+        model=OPENAI_TTS_MODEL,
+        voice=OPENAI_TTS_VOICE,
+        input=text,
+        response_format="mp3",
+    )
+    speech.stream_to_file(str(out_path))
+
+
+def _synthesize_tts(text: str, out_path: Path) -> str:
+    errors: list[str] = []
+    providers: list[str]
+    if TTS_PROVIDER == "gtts":
+        providers = ["gtts"]
+    elif TTS_PROVIDER == "openai":
+        providers = ["openai"]
+    else:
+        providers = ["gtts", "openai"]  # auto fallback
+
+    for provider in providers:
+        try:
+            if provider == "gtts":
+                gTTS(text, lang="en").save(str(out_path))
+                return "gtts"
+            if provider == "openai":
+                _synthesize_tts_openai(text, out_path)
+                return "openai"
+        except Exception as exc:  # pragma: no cover - runtime guard
+            errors.append(f"{provider}:{type(exc).__name__}:{exc}")
+    raise RuntimeError("TTS failed for all providers: " + " | ".join(errors))
+
+
 def _check_s3_ready() -> tuple[bool, str]:
     try:
         bucket = os.getenv("S3_BUCKET", "").strip()
@@ -938,7 +978,7 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
         page_audio = audio_dir / f"page_{idx}.mp3"
         page_image = image_dir / f"page_{idx}.png"
         try:
-            gTTS(str(slide.get("narration_text", slide["text"])), lang="en").save(str(page_audio))
+            tts_used = _synthesize_tts(str(slide.get("narration_text", slide["text"])), page_audio)
         except Exception as exc:  # pragma: no cover - runtime guard
             raise HTTPException(
                 status_code=502,
@@ -978,6 +1018,7 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
                 "visual_type": visual_type,
                 "visual_prompt": visual_prompt,
                 "visual_file": str(page_visual) if page_visual.exists() else None,
+                "tts_provider_used": tts_used,
                 "audio_file": str(page_audio),
                 "image_file": str(page_image),
                 "duration_sec": duration,
