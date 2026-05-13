@@ -261,6 +261,22 @@ building that bridge. Mis-calibrating to the student is a scoring failure.
 4. NEVER write a sentence that could appear unchanged in a lesson on a completely different topic.
 5. NEVER leave a worked example with unchecked arithmetic — verify every numerical result.
 
+=== TITLE RULES ===
+Titles must name the specific concept being taught on that slide — not the lesson structure.
+Maximum 10 words. No generic labels.
+
+BANNED titles (immediate failure — these prove the video is meta, not teaching):
+"Learning Goal", "Learning Goals", "Key Learning Points", "Core Concept", "Introduction",
+"Overview", "Summary", "Worked Example", "Key Takeaway", "Lesson Objectives",
+or any title that could appear unchanged on a slide about a completely different topic.
+
+GOOD titles name the actual fact or mechanism:
+  ✓ "Glucose Is the Fuel Cells Actually Burn"
+  ✓ "Why Light and Dark Reactions Run in Parallel"
+  ✓ "Chlorophyll Absorbs Red and Blue, Reflects Green"
+  ✗ "Core Concept" — banned, says nothing specific
+  ✗ "Key Learning Points" — banned, describes the lesson not the content
+
 === SLIDE COUNT ===
 Choose 5–8 slides based on how many distinct sub-concepts the topic genuinely requires.
 Do not pad. Do not compress unrelated ideas into one slide.
@@ -329,7 +345,7 @@ Course requirement: {course_requirement}
             return None
         normalized: list[dict] = []
         for i, slide in enumerate(slides, start=1):
-            title  = str(slide.get("title", f"Slide {i}")).strip()
+            title  = _truncate_title(str(slide.get("title", f"Slide {i}")).strip())
             text   = str(slide.get("text", "")).strip()
             visual = slide.get("visual")  # dict or None
             if not text:
@@ -352,6 +368,13 @@ def _truncate_to_word_limit(text: str, max_words: int = 100) -> str:
     words = text.split()
     if len(words) <= max_words:
         return text
+    return " ".join(words[:max_words])
+
+
+def _truncate_title(title: str, max_words: int = 10) -> str:
+    words = title.split()
+    if len(words) <= max_words:
+        return title
     return " ".join(words[:max_words])
 
 
