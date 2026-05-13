@@ -887,11 +887,9 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     job_dir = JOBS_ROOT / f"{job_id}_{run_tag}"
     audio_dir = job_dir / "audio"
     image_dir = job_dir / "images"
-    visuals_dir = job_dir / "assets" / "visuals"
     job_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
     image_dir.mkdir(parents=True, exist_ok=True)
-    visuals_dir.mkdir(parents=True, exist_ok=True)
 
     slides = _build_slide_plan_with_llm(payload.course_requirement, payload.student_persona)
     if slides is None:
@@ -939,15 +937,6 @@ def _run_generation(payload: GenerateRequest, request: Request) -> GenerateRespo
     for idx, slide in enumerate(slides, start=1):
         page_audio = audio_dir / f"page_{idx}.mp3"
         page_image = image_dir / f"page_{idx}.png"
-        page_visual = visuals_dir / f"page_{idx}.png"
-        visual_type = str(slide.get("visual_type", "none")).strip().lower()
-        visual_prompt = str(slide.get("visual_prompt", "")).strip()
-        _render_visual_asset(
-            page=idx,
-            visual_type=visual_type,
-            visual_prompt=visual_prompt,
-            output_path=page_visual,
-        )
         try:
             gTTS(str(slide.get("narration_text", slide["text"])), lang="en").save(str(page_audio))
         except Exception as exc:  # pragma: no cover - runtime guard
